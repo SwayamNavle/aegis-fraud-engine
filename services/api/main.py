@@ -6,6 +6,7 @@ Unified backend gateway for real-time fraud detection, analytics, and WebSockets
 import os
 import sys
 import time
+from typing import Dict, Any
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -90,6 +91,26 @@ def health():
         "service": "aegis-api-gateway",
         "timestamp": time.time()
     }
+
+
+@app.get("/model/info")
+def model_info():
+    """Returns model metadata, active version, hyperparameters, and feature schema."""
+    from services.api.routes.transactions import get_predictor
+    predictor = get_predictor()
+    return predictor.registry.get_info()
+
+
+@app.post("/predict")
+def predict_transaction(payload: Dict[str, Any]):
+    """Inline transaction scoring endpoint."""
+    from services.api.routes.transactions import get_predictor
+    predictor = get_predictor()
+    if "transaction_count_5m" in payload and "amount_z_score" in payload:
+        from streaming.schemas.transaction_schema import FeatureVector
+        fv = FeatureVector(**payload)
+        return predictor.predict(feature_vector=fv)
+    return predictor.predict(raw_txn=payload)
 
 
 @app.get("/metrics")

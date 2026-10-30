@@ -114,11 +114,11 @@ class OnlineFeatureStore:
         else:
             ts_epoch = float(raw_ts)
 
-        amount = float(txn["amount"])
-        lat = float(txn["latitude"])
-        lon = float(txn["longitude"])
-        country = txn["country"]
-        device_id = txn["device_id"]
+        amount = float(txn.get("amount", 0.0))
+        lat = float(txn.get("latitude", 0.0))
+        lon = float(txn.get("longitude", 0.0))
+        country = txn.get("country", "IN")
+        device_id = txn.get("device_id", f"dev_{acc_id[-4:]}")
         cat = txn.get("merchant_category", "retail")
         is_intl = bool(txn.get("is_international", False))
         card_present = bool(txn.get("card_present", False))
