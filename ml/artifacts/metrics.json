@@ -1,7 +1,7 @@
 {
   "model_version": "xgb-v1.0.0",
   "champion_architecture": "baseline",
-  "evaluation_timestamp": "2026-10-30T11:38:23.515072+00:00",
+  "evaluation_timestamp": "2026-10-30T12:55:02.567034+00:00",
   "optimal_threshold": 0.85,
   "test_metrics": {
     "threshold_used": 0.85,

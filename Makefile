@@ -35,7 +35,7 @@ train:
 	bash scripts/train_model.sh
 
 test:
-	$(PYTEST) tests/ -v
+	bash -c "export DYLD_LIBRARY_PATH=\"$(PWD)/lib:\$$DYLD_LIBRARY_PATH\" && source .venv/bin/activate && python3 -m pytest tests/ -v"
 
 run:
 	bash scripts/start_local.sh
