@@ -33,17 +33,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Prometheus Telemetry
-HTTP_REQUESTS_TOTAL = Counter(
-    "aegis_http_requests_total",
-    "Total HTTP requests handled by endpoint",
-    ["method", "endpoint", "status_code"]
-)
-HTTP_REQUEST_DURATION = Histogram(
-    "aegis_http_request_duration_seconds",
-    "HTTP request latency in seconds",
-    ["endpoint"]
-)
+# Prometheus Telemetry (Idempotent registration for test suites)
+from prometheus_client import REGISTRY
+
+if "aegis_http_requests_total" in REGISTRY._names_to_collectors:
+    HTTP_REQUESTS_TOTAL = REGISTRY._names_to_collectors["aegis_http_requests_total"]
+else:
+    HTTP_REQUESTS_TOTAL = Counter(
+        "aegis_http_requests_total",
+        "Total HTTP requests handled by endpoint",
+        ["method", "endpoint", "status_code"]
+    )
+
+if "aegis_http_request_duration_seconds" in REGISTRY._names_to_collectors:
+    HTTP_REQUEST_DURATION = REGISTRY._names_to_collectors["aegis_http_request_duration_seconds"]
+else:
+    HTTP_REQUEST_DURATION = Histogram(
+        "aegis_http_request_duration_seconds",
+        "HTTP request latency in seconds",
+        ["endpoint"]
+    )
 
 
 @app.middleware("http")

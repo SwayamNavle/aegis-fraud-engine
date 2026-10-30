@@ -15,7 +15,7 @@ from services.api.database.connection import Base
 class TransactionRecord(Base):
     __tablename__ = "transactions"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     transaction_id = Column(String(64), unique=True, nullable=False, index=True)
     timestamp = Column(String(64), nullable=False, index=True)
     user_id = Column(String(64), nullable=False)
@@ -64,7 +64,7 @@ class TransactionRecord(Base):
 class PredictionRecord(Base):
     __tablename__ = "predictions"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     transaction_id = Column(String(64), unique=True, nullable=False, index=True)
     timestamp = Column(String(64), nullable=False, index=True)
     account_id = Column(String(64), nullable=False, index=True)
@@ -101,7 +101,7 @@ class PredictionRecord(Base):
 class FeatureRecord(Base):
     __tablename__ = "features"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     transaction_id = Column(String(64), unique=True, nullable=False, index=True)
     account_id = Column(String(64), nullable=False, index=True)
     timestamp = Column(String(64), nullable=False)
@@ -156,7 +156,7 @@ class FeatureRecord(Base):
 class FraudAlertRecord(Base):
     __tablename__ = "fraud_alerts"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     alert_id = Column(String(64), unique=True, nullable=False, index=True)
     transaction_id = Column(String(64), nullable=False, index=True)
     account_id = Column(String(64), nullable=False, index=True)

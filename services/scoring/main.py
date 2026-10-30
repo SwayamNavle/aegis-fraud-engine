@@ -31,22 +31,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Prometheus Telemetry Metrics
-PREDICTIONS_TOTAL = Counter(
+# Prometheus Telemetry Metrics (Idempotent registration for test suites)
+from prometheus_client import REGISTRY
+
+PREDICTIONS_TOTAL = REGISTRY._names_to_collectors.get("aegis_scoring_predictions_total") or Counter(
     "aegis_scoring_predictions_total",
     "Total fraud predictions evaluated",
     ["decision", "model_version"]
 )
-FRAUD_DETECTED_TOTAL = Counter(
+FRAUD_DETECTED_TOTAL = REGISTRY._names_to_collectors.get("aegis_scoring_fraud_detected_total") or Counter(
     "aegis_scoring_fraud_detected_total",
     "Total fraudulent transactions identified"
 )
-SCORING_LATENCY = Histogram(
+SCORING_LATENCY = REGISTRY._names_to_collectors.get("aegis_scoring_latency_seconds") or Histogram(
     "aegis_scoring_latency_seconds",
     "Inference latency in seconds",
     buckets=[0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100]
 )
-RISK_SCORE_HISTOGRAM = Histogram(
+RISK_SCORE_HISTOGRAM = REGISTRY._names_to_collectors.get("aegis_scoring_risk_score") or Histogram(
     "aegis_scoring_risk_score",
     "Distribution of calibrated risk scores [0 - 100]",
     buckets=[10, 25, 40, 50, 60, 70, 80, 90, 100]
