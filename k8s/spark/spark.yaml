@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis-spark-streaming
+  namespace: aegis-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aegis-spark-streaming
+  template:
+    metadata:
+      labels:
+        app: aegis-spark-streaming
+    spec:
+      containers:
+        - name: spark
+          image: aegis-spark:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "aegis-kafka:9092"
+            - name: SCORING_SERVICE_URL
+              value: "http://aegis-scoring:8001/predict"
+            - name: SPARK_CHECKPOINT_DIR
+              value: "/tmp/checkpoints"
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "4000m"
+              memory: "6Gi"
