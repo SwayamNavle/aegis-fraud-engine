@@ -35,4 +35,4 @@ export HOST="0.0.0.0"
 export DATABASE_URL="sqlite+aiosqlite:///./data/aegis.db"
 export FRAUD_THRESHOLD="0.85"
 
-exec uvicorn services.api.main:app --host "$HOST" --port "$PORT" --log-level info
+exec python3 -m uvicorn services.api.main:app --host "$HOST" --port "$PORT" --log-level info
