@@ -1,0 +1,22 @@
+{
+  "transaction_amount_sum_5m": 0.74779,
+  "transaction_amount_avg_5m": 0.09746,
+  "amount_z_score": 0.05872,
+  "unique_merchants_10m": 0.03921,
+  "card_present": 0.01511,
+  "time_since_previous_transaction": 0.01141,
+  "transaction_count_5m": 0.00705,
+  "merchant_risk_score": 0.00659,
+  "transaction_amount_std_5m": 0.00468,
+  "transaction_count_1m": 0.004,
+  "distance_from_previous_transaction": 0.00377,
+  "user_amount_deviation": 0.00255,
+  "geo_velocity_kmh": 0.00166,
+  "unique_countries_30m": 0.0,
+  "unique_devices_30m": 0.0,
+  "international_transaction_count": 0.0,
+  "device_change_flag": 0.0,
+  "country_change_flag": 0.0,
+  "velocity_score": 0.0,
+  "is_international": 0.0
+}

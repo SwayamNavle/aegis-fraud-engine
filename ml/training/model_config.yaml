@@ -1,0 +1,36 @@
+model:
+  name: "aegis_xgb_fraud_detector"
+  version: "xgb-v1.0.0"
+  algorithm: "XGBClassifier"
+  objective: "binary:logistic"
+  eval_metric: "aucpr"
+  random_state: 42
+  n_estimators: 150
+  max_depth: 6
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 3
+
+data:
+  raw_path: "data/raw/train_transactions.csv"
+  processed_path: "data/processed/train_features.parquet"
+  train_split: 0.70
+  val_split: 0.15
+  test_split: 0.15
+  fraud_ratio: 0.015
+
+thresholds:
+  default_fraud_threshold: 0.70
+  medium_risk_threshold: 0.40
+  metric_target: "f1"
+
+artifacts:
+  model_dir: "ml/models"
+  model_filename: "xgb_fraud_model.json"
+  artifacts_dir: "ml/artifacts"
+  metrics_filename: "metrics.json"
+  schema_filename: "feature_schema.json"
+  metadata_filename: "training_metadata.json"
+  confusion_matrix_filename: "confusion_matrix.json"
+  feature_importance_filename: "feature_importance.json"

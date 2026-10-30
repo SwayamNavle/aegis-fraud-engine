@@ -1,0 +1,26 @@
+{
+  "features": [
+    "transaction_count_1m",
+    "transaction_count_5m",
+    "transaction_amount_sum_5m",
+    "transaction_amount_avg_5m",
+    "transaction_amount_std_5m",
+    "amount_z_score",
+    "unique_merchants_10m",
+    "unique_countries_30m",
+    "unique_devices_30m",
+    "international_transaction_count",
+    "time_since_previous_transaction",
+    "distance_from_previous_transaction",
+    "geo_velocity_kmh",
+    "device_change_flag",
+    "country_change_flag",
+    "velocity_score",
+    "merchant_risk_score",
+    "user_amount_deviation",
+    "card_present",
+    "is_international"
+  ],
+  "feature_count": 20,
+  "model_version": "xgb-v1.0.0"
+}
