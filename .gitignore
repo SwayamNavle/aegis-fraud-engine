@@ -1,0 +1,70 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C extensions
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env
+.env.local
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Data and Artifacts (except sample templates)
+data/raw/*.csv
+data/processed/*.parquet
+!data/sample_transactions.csv
+checkpoints/
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+frontend/build/
+
+# Test and Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# Database data
+postgres_data/
