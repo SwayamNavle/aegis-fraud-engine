@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "aegis-api"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["api:8000", "localhost:8000"]
+
+  - job_name: "aegis-scoring"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["scoring:8001", "localhost:8001"]
+
+  - job_name: "aegis-spark"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["spark:4040"]
