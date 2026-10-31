@@ -1,6 +1,7 @@
 """
 Aegis Transactions API Routes
-Provides paginated transaction history, detailed inspection, and idempotent prediction persistence.
+Provides paginated transaction history, detailed inspection, data quality validation,
+and idempotent prediction persistence with customer/merchant profiling.
 """
 
 from typing import Optional, List, Dict, Any
@@ -9,9 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 
 from services.api.database.connection import get_db_session
-from services.api.models.db_models import TransactionRecord, PredictionRecord, FeatureRecord, FraudAlertRecord
+from services.api.models.db_models import (
+    TransactionRecord, PredictionRecord, FeatureRecord, FraudAlertRecord,
+    CustomerProfileRecord, MerchantProfileRecord
+)
 from services.scoring.predictor import FraudPredictor
+from services.api.data_quality import DataQualityValidator, DeadLetterQueue, DUPLICATE_TRANSACTIONS_TOTAL
 from streaming.schemas.transaction_schema import PredictionResult
+from risk_engine.profiler import ProfileManager
 
 router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
@@ -28,7 +34,7 @@ def get_predictor():
 
 @router.get("")
 async def list_transactions(
-    decision: Optional[str] = Query(None, description="Filter by decision: LEGITIMATE, SUSPICIOUS, FRAUD"),
+    decision: Optional[str] = Query(None, description="Filter: LEGITIMATE, SUSPICIOUS, FRAUD, APPROVE, REVIEW, DECLINE"),
     account_id: Optional[str] = Query(None, description="Filter by account ID"),
     min_risk: Optional[float] = Query(None, ge=0.0, le=100.0, description="Minimum risk score"),
     limit: int = Query(50, ge=1, le=200, description="Page limit"),
@@ -39,7 +45,17 @@ async def list_transactions(
     query = select(PredictionRecord).order_by(desc(PredictionRecord.id))
 
     if decision:
-        query = query.where(PredictionRecord.decision == decision.upper())
+        d = decision.upper()
+        # Handle both business decisions and legacy decisions
+        if d in ["APPROVE", "LEGITIMATE"]:
+            query = query.where(PredictionRecord.decision.in_(["LEGITIMATE", "APPROVE"]))
+        elif d in ["REVIEW", "SUSPICIOUS"]:
+            query = query.where(PredictionRecord.decision.in_(["SUSPICIOUS", "REVIEW"]))
+        elif d in ["DECLINE", "FRAUD"]:
+            query = query.where(PredictionRecord.decision.in_(["FRAUD", "DECLINE"]))
+        else:
+            query = query.where(PredictionRecord.decision == d)
+
     if account_id:
         query = query.where(PredictionRecord.account_id == account_id)
     if min_risk is not None:
@@ -66,9 +82,9 @@ async def get_transaction_detail(
     Returns complete transaction inspection dossier:
     - Raw transaction payload
     - Feature vector
-    - Scored prediction & decision
-    - Deterministic reason codes
-    - Top contributing features for explainability
+    - Scored prediction, business decision, and risk level
+    - Deterministic reason codes and rule violations
+    - Top contributing features for explainability (TreeSHAP)
     """
     pred_res = await db.execute(select(PredictionRecord).where(PredictionRecord.transaction_id == transaction_id))
     pred = pred_res.scalar_one_or_none()
@@ -81,11 +97,20 @@ async def get_transaction_detail(
     feat_res = await db.execute(select(FeatureRecord).where(FeatureRecord.transaction_id == transaction_id))
     feat = feat_res.scalar_one_or_none()
 
+    # Get customer & merchant profile info if available
+    acc_id = pred.account_id
+    merch_id = pred.merchant_id
+    profile_mgr = ProfileManager.get_instance()
+    cust_profile = profile_mgr.customers.get(acc_id)
+    merch_profile = profile_mgr.merchants.get(merch_id)
+
     return {
         "transaction_id": transaction_id,
         "prediction": pred.to_dict(),
         "transaction": txn.to_dict() if txn else None,
-        "features": feat.to_dict() if feat else None
+        "features": feat.to_dict() if feat else None,
+        "customer_profile": cust_profile.to_dict() if cust_profile else None,
+        "merchant_profile": merch_profile.to_dict() if merch_profile else None
     }
 
 
@@ -95,36 +120,63 @@ async def score_and_persist(
     db: AsyncSession = Depends(get_db_session)
 ):
     """
-    Idempotent processing endpoint.
-    1. Checks if transaction_id has already been processed. If yes, returns existing prediction without re-insertion.
-    2. Otherwise, extracts features, calculates XGBoost fraud probability, saves to DB, creates alert if high risk.
+    Idempotent processing endpoint with Data Quality validation.
+    1. Validates payload invariants. Malformed events are routed to Dead-Letter Queue (DLQ).
+    2. Idempotency Check: Returns existing prediction if transaction_id has already been processed.
+    3. Executes multi-factor feature extraction and risk decision scoring.
+    4. Updates customer and merchant risk profiles.
+    5. Persists records to database and creates fraud alert if elevated risk.
     """
-    txn_id = payload.get("transaction_id")
-    if not txn_id:
-        raise HTTPException(status_code=400, detail="Missing transaction_id in payload.")
+    # 1. DATA QUALITY LAYER
+    is_valid, validation_error = DataQualityValidator.validate(payload)
+    if not is_valid:
+        DeadLetterQueue.send_to_dlq(payload, reason=validation_error or "Data quality validation failed")
+        raise HTTPException(status_code=400, detail=f"Data Quality Violation: {validation_error}")
 
-    # IDEMPOTENCY CHECK: Return existing prediction if already recorded
+    txn_id = payload["transaction_id"]
+
+    # 2. IDEMPOTENCY CHECK
     existing_res = await db.execute(select(PredictionRecord).where(PredictionRecord.transaction_id == txn_id))
     existing = existing_res.scalar_one_or_none()
     if existing:
+        DUPLICATE_TRANSACTIONS_TOTAL.inc()
         return PredictionResult(
             transaction_id=existing.transaction_id,
+            correlation_id=existing.correlation_id,
             fraud_probability=existing.fraud_probability,
             risk_score=existing.risk_score,
             decision=existing.decision,
+            business_decision=existing.business_decision or "APPROVE",
             model_version=existing.model_version,
             latency_ms=existing.latency_ms,
             reason_codes=existing.reason_codes or [],
             feature_contributions=existing.feature_contributions or {}
         )
 
-    # Perform inference
+    # 3. FEATURE EXTRACTION & INFERENCE
     predictor = get_predictor()
-    # Extract features and predict
     fv = predictor.feature_store.extract_features(payload)
-    pred_result = predictor.predict(feature_vector=fv)
+    pred_result = predictor.predict(raw_txn=payload, feature_vector=fv)
 
-    # Persist transaction
+    # 4. PROFILE UPDATES
+    profile_mgr = ProfileManager.get_instance()
+    is_fraud = pred_result.business_decision in ["DECLINE", "REVIEW"] or pred_result.decision in ["FRAUD", "SUSPICIOUS"]
+    
+    cust = profile_mgr.get_or_create_customer(fv.account_id, payload.get("user_id", "usr_unknown"))
+    cust.update_with_transaction(
+        amount=float(payload.get("amount", 0.0)),
+        device_id=payload.get("device_id", "dev_unknown"),
+        country=payload.get("country", "IN"),
+        is_fraud=is_fraud
+    )
+
+    merch = profile_mgr.get_or_create_merchant(
+        merchant_id=payload.get("merchant_id", "merch_unknown"),
+        category=payload.get("merchant_category", "retail")
+    )
+    merch.update_with_transaction(amount=float(payload.get("amount", 0.0)), is_fraud=is_fraud)
+
+    # 5. PERSIST TRANSACTION
     txn_record = TransactionRecord(
         transaction_id=txn_id,
         timestamp=payload.get("timestamp"),
@@ -148,7 +200,7 @@ async def score_and_persist(
     )
     db.add(txn_record)
 
-    # Persist features
+    # 6. PERSIST FEATURES
     feat_record = FeatureRecord(
         transaction_id=txn_id,
         account_id=fv.account_id,
@@ -175,9 +227,10 @@ async def score_and_persist(
     )
     db.add(feat_record)
 
-    # Persist prediction
+    # 7. PERSIST PREDICTION
     pred_record = PredictionRecord(
         transaction_id=txn_id,
+        correlation_id=payload.get("correlation_id"),
         timestamp=payload.get("timestamp"),
         account_id=payload.get("account_id"),
         amount=float(payload.get("amount", 0.0)),
@@ -186,6 +239,7 @@ async def score_and_persist(
         fraud_probability=pred_result.fraud_probability,
         risk_score=pred_result.risk_score,
         decision=pred_result.decision,
+        business_decision=pred_result.business_decision or "APPROVE",
         model_version=pred_result.model_version,
         latency_ms=pred_result.latency_ms,
         reason_codes=pred_result.reason_codes,
@@ -193,9 +247,9 @@ async def score_and_persist(
     )
     db.add(pred_record)
 
-    # Create alert if FRAUD or SUSPICIOUS
-    if pred_result.decision in ["FRAUD", "SUSPICIOUS"]:
-        severity = "CRITICAL" if pred_result.risk_score >= 85.0 else ("HIGH" if pred_result.risk_score >= 70.0 else "MEDIUM")
+    # 8. CREATE ALERT IF HIGH RISK OR SUSPICIOUS
+    if is_fraud or pred_result.risk_score >= 45.0:
+        severity = "CRITICAL" if pred_result.risk_score >= 80.0 else ("HIGH" if pred_result.risk_score >= 60.0 else "MEDIUM")
         alert = FraudAlertRecord(
             alert_id=f"alt_{txn_id[-8:]}",
             transaction_id=txn_id,
@@ -205,7 +259,7 @@ async def score_and_persist(
             risk_score=pred_result.risk_score,
             fraud_probability=pred_result.fraud_probability,
             reason_codes=pred_result.reason_codes,
-            status="OPEN"
+            status="NEW"
         )
         db.add(alert)
 

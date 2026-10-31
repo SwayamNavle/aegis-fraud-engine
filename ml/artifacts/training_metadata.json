@@ -1,12 +1,12 @@
 {
   "model_name": "aegis_xgb_fraud_detector",
   "model_version": "xgb-v1.0.0",
-  "training_timestamp": "2026-10-30T12:55:02.567155+00:00",
+  "training_timestamp": "2026-10-30T14:40:27.316658+00:00",
   "dataset_rows": 50000,
   "train_rows": 35000,
   "val_rows": 7500,
   "test_rows": 7500,
-  "scale_pos_weight": 66.18,
+  "scale_pos_weight": 60.84,
   "optimal_threshold": 0.85,
   "features": [
     "transaction_count_1m",

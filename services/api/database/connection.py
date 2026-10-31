@@ -55,11 +55,44 @@ async def get_engine():
 
 
 async def init_db():
-    """Initializes schema tables if they do not exist."""
+    """Initializes schema tables if they do not exist and applies non-destructive column migrations."""
     engine = await get_engine()
     from services.api.models import db_models  # Ensure models are imported
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        
+        # SQLite automated column migration helper
+        if _is_sqlite:
+            from sqlalchemy import text
+            # Ensure predictions columns
+            pred_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(predictions)"))).fetchall()]
+            if "correlation_id" not in pred_cols:
+                await conn.execute(text("ALTER TABLE predictions ADD COLUMN correlation_id VARCHAR(64)"))
+            if "business_decision" not in pred_cols:
+                await conn.execute(text("ALTER TABLE predictions ADD COLUMN business_decision VARCHAR(32) DEFAULT 'APPROVE'"))
+            if "ground_truth" not in pred_cols:
+                await conn.execute(text("ALTER TABLE predictions ADD COLUMN ground_truth VARCHAR(32) DEFAULT 'UNVERIFIED'"))
+
+            # Ensure fraud_alerts columns
+            alert_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(fraud_alerts)"))).fetchall()]
+            if "reviewer" not in alert_cols:
+                await conn.execute(text("ALTER TABLE fraud_alerts ADD COLUMN reviewer VARCHAR(64)"))
+            if "notes" not in alert_cols:
+                await conn.execute(text("ALTER TABLE fraud_alerts ADD COLUMN notes VARCHAR(512)"))
+            if "final_ground_truth" not in alert_cols:
+                await conn.execute(text("ALTER TABLE fraud_alerts ADD COLUMN final_ground_truth VARCHAR(32) DEFAULT 'UNVERIFIED'"))
+
+            # Ensure model_versions columns
+            mv_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(model_versions)"))).fetchall()]
+            if "dataset_version" not in mv_cols:
+                await conn.execute(text("ALTER TABLE model_versions ADD COLUMN dataset_version VARCHAR(32) DEFAULT 'v1.0'"))
+            if "feature_version" not in mv_cols:
+                await conn.execute(text("ALTER TABLE model_versions ADD COLUMN feature_version VARCHAR(32) DEFAULT 'v1.0'"))
+            if "status" not in mv_cols:
+                await conn.execute(text("ALTER TABLE model_versions ADD COLUMN status VARCHAR(32) DEFAULT 'PRODUCTION'"))
+            if "updated_at" not in mv_cols:
+                await conn.execute(text("ALTER TABLE model_versions ADD COLUMN updated_at TIMESTAMP"))
+
     print(f"[Aegis Database] Tables initialized (Mode: {'SQLite' if _is_sqlite else 'PostgreSQL'}).")
 
 

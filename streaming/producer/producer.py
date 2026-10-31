@@ -114,16 +114,18 @@ class SyntheticTransactionGenerator:
         
         if not is_fraud:
             # -------------------------------------------------------------
-            # LEGITIMATE TRANSACTION PATTERN
+            # LEGITIMATE TRANSACTION PATTERNS (with realistic edge cases)
             # -------------------------------------------------------------
-            # Normal amount sampled from log-normal around user mean
-            amount = max(10.0, round(random.gauss(user.mean_amount, user.std_amount), 2))
+            legit_scenario = random.choices(
+                ["normal", "high_value", "shopping_burst", "new_device", "intl_travel", "high_risk_merch"],
+                weights=[0.82, 0.06, 0.05, 0.03, 0.02, 0.02],
+                k=1
+            )[0]
+
             cat = random.choice(MERCHANT_CATEGORIES["normal"])
             merchant_id = random.choice(self.merchants[cat])
-            
-            # Normal location with slight jitter around last location
-            lat = user.last_lat + random.uniform(-0.02, 0.02)
-            lon = user.last_lon + random.uniform(-0.02, 0.02)
+            lat = user.last_lat + random.uniform(-0.015, 0.015)
+            lon = user.last_lon + random.uniform(-0.015, 0.015)
             city = user.home_city
             country = user.home_country
             device_id = user.primary_device_id
@@ -131,19 +133,51 @@ class SyntheticTransactionGenerator:
             ip = user.primary_ip
             is_intl = False
             card_present = random.choice([True, False])
-            
-            # Normal interval between transactions (10 minutes to 6 hours)
             time_gap = random.uniform(600.0, 21600.0)
+
+            if legit_scenario == "normal":
+                amount = max(15.0, round(random.gauss(user.mean_amount, user.std_amount), 2))
+
+            elif legit_scenario == "high_value":
+                # Legitimate high-ticket purchase (e.g. electronics, festival shopping, home appliance)
+                amount = round(random.uniform(12000.0, 68000.0), 2)
+                cat = random.choice(["electronics", "department_store", "entertainment"])
+                merchant_id = random.choice(self.merchants[cat])
+
+            elif legit_scenario == "shopping_burst":
+                # Legitimate rapid shopping (e.g. multiple items in a mall, or quick successive online orders)
+                amount = max(20.0, round(random.gauss(user.mean_amount * 0.8, user.std_amount * 0.6), 2))
+                time_gap = random.uniform(25.0, 95.0)
+
+            elif legit_scenario == "new_device":
+                # Legitimate device upgrade or work computer
+                amount = max(15.0, round(random.gauss(user.mean_amount, user.std_amount), 2))
+                device_id = f"dev_{uuid.uuid4().hex[:12]}"
+                device_type = random.choice(["iPhone", "Android", "Web"])
+
+            elif legit_scenario == "intl_travel":
+                # Legitimate holiday/business trip or international SaaS subscription
+                foreign_city = random.choice(["Dubai", "Singapore", "London"])
+                lat_f, lon_f, country_f = CITIES[foreign_city]
+                lat, lon, city, country = lat_f, lon_f, foreign_city, country_f
+                amount = round(random.uniform(2500.0, 32000.0), 2)
+                is_intl = True
+
+            else:  # high_risk_merch
+                # Legitimate crypto investment or gaming
+                amount = round(random.uniform(1500.0, 18000.0), 2)
+                cat = random.choice(["crypto_exchange", "online_gambling"])
+                merchant_id = random.choice(self.merchants[cat])
+
             txn_time = max(now, user.last_timestamp + timedelta(seconds=time_gap))
             prev_time_str = user.last_timestamp.isoformat()
-            
-            # Update user state
+
             user.last_timestamp = txn_time
             user.last_lat = lat
             user.last_lon = lon
             user.last_city = city
             user.last_country = country
-            
+
             return TransactionEvent(
                 transaction_id=f"txn_{uuid.uuid4().hex[:14]}",
                 timestamp=txn_time.isoformat(),
@@ -168,19 +202,19 @@ class SyntheticTransactionGenerator:
             )
 
         # -----------------------------------------------------------------
-        # FRAUDULENT PATTERNS INJECTION
+        # FRAUDULENT PATTERNS INJECTION (with stealth and varied modalities)
         # -----------------------------------------------------------------
-        fraud_pattern = random.choice([
+        fraud_pattern = random.choices([
             "velocity", "amount_anomaly", "geo_impossible",
-            "merchant_anomaly", "device_anomaly", "international_spike"
-        ])
-        
+            "stealth_card_testing", "account_takeover", "merchant_anomaly", "international_spike"
+        ], weights=[0.24, 0.20, 0.15, 0.15, 0.12, 0.08, 0.06], k=1)[0]
+
         prev_time_str = user.last_timestamp.isoformat()
-        
+
         if fraud_pattern == "velocity":
-            # Pattern 1: Rapid succession burst (< 45 seconds from previous)
-            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(3.0, 45.0))
-            amount = round(random.uniform(5000.0, 35000.0), 2)
+            # Rapid burst (< 45 seconds from previous)
+            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(4.0, 42.0))
+            amount = round(random.uniform(4500.0, 32000.0), 2)
             cat = random.choice(MERCHANT_CATEGORIES["normal"])
             merchant_id = random.choice(self.merchants[cat])
             city = user.last_city
@@ -192,10 +226,10 @@ class SyntheticTransactionGenerator:
             card_present = False
 
         elif fraud_pattern == "amount_anomaly":
-            # Pattern 2: Severe amount anomaly (user spends ₹500-₹2500, suddenly ₹85,000+)
-            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(120.0, 1800.0))
-            amount = round(random.uniform(75000.0, 250000.0), 2)
-            cat = random.choice(["luxury_watches", "crypto_exchange", "department_store"])
+            # Severe amount anomaly (user spends ₹500-₹2500, suddenly ₹45,000 - ₹180,000)
+            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(90.0, 1500.0))
+            amount = round(random.uniform(45000.0, 185000.0), 2)
+            cat = random.choice(["luxury_watches", "crypto_exchange", "department_store", "electronics"])
             merchant_id = random.choice(self.merchants[cat])
             city = user.last_city
             lat, lon, country = user.last_lat, user.last_lon, user.last_country
@@ -206,27 +240,56 @@ class SyntheticTransactionGenerator:
             card_present = False
 
         elif fraud_pattern == "geo_impossible":
-            # Pattern 3: Impossible Travel (e.g. Mumbai -> London or Tokyo within 2-5 minutes)
-            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(30.0, 300.0))
+            # Impossible Travel (e.g. Mumbai -> London/Dubai within 2-6 minutes)
+            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(30.0, 360.0))
             foreign_city = random.choice(["London", "New York", "Dubai", "Singapore", "Tokyo"])
             lat_f, lon_f, country_f = CITIES[foreign_city]
             lat = lat_f + random.uniform(-0.02, 0.02)
             lon = lon_f + random.uniform(-0.02, 0.02)
             city = foreign_city
             country = country_f
-            amount = round(random.uniform(15000.0, 95000.0), 2)
-            cat = random.choice(["crypto_exchange", "luxury_watches", "online_gambling"])
+            amount = round(random.uniform(12000.0, 75000.0), 2)
+            cat = random.choice(["crypto_exchange", "luxury_watches", "online_gambling", "wire_remittance"])
             merchant_id = random.choice(self.merchants[cat])
-            device_id = f"dev_{uuid.uuid4().hex[:12]}"  # often unknown device too
+            device_id = f"dev_{uuid.uuid4().hex[:12]}"
             device_type = "Android_Emulator"
             ip = f"185.{random.randint(10, 250)}.{random.randint(1, 250)}.{random.randint(1, 250)}"
             is_intl = True
             card_present = False
 
+        elif fraud_pattern == "stealth_card_testing":
+            # Stealth / Micro-fraud: small low-profile probe transactions (₹120 - ₹1,800)
+            # designed to evade rule thresholds while card is tested
+            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(180.0, 3600.0))
+            amount = round(random.uniform(120.0, 1850.0), 2)
+            cat = random.choice(["grocery", "pharmacy", "fuel", "restaurants"])
+            merchant_id = random.choice(self.merchants[cat])
+            city = user.last_city
+            lat, lon, country = user.last_lat, user.last_lon, user.last_country
+            device_id = user.primary_device_id
+            device_type = user.primary_device_type
+            ip = user.primary_ip
+            is_intl = False
+            card_present = False
+
+        elif fraud_pattern == "account_takeover":
+            # ATO: New device + moderately elevated spend + moderate velocity
+            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(80.0, 600.0))
+            amount = round(random.uniform(8000.0, 34000.0), 2)
+            cat = random.choice(["electronics", "wire_remittance", "department_store"])
+            merchant_id = random.choice(self.merchants[cat])
+            city = user.last_city
+            lat, lon, country = user.last_lat, user.last_lon, user.last_country
+            device_id = f"dev_{uuid.uuid4().hex[:12]}"
+            device_type = random.choice(["Web", "Android_Emulator"])
+            ip = f"45.{random.randint(10, 250)}.{random.randint(1, 250)}.{random.randint(1, 250)}"
+            is_intl = False
+            card_present = False
+
         elif fraud_pattern == "merchant_anomaly":
-            # Pattern 4: High-risk merchant category (crypto, gambling, offshore)
+            # High-risk merchant category (crypto, gambling, offshore)
             txn_time = user.last_timestamp + timedelta(seconds=random.uniform(60.0, 900.0))
-            amount = round(random.uniform(25000.0, 80000.0), 2)
+            amount = round(random.uniform(18000.0, 65000.0), 2)
             cat = random.choice(MERCHANT_CATEGORIES["high_risk"])
             merchant_id = random.choice(self.merchants[cat])
             city = user.last_city
@@ -237,27 +300,12 @@ class SyntheticTransactionGenerator:
             is_intl = False
             card_present = False
 
-        elif fraud_pattern == "device_anomaly":
-            # Pattern 5: New unknown device + emulator origin
-            txn_time = user.last_timestamp + timedelta(seconds=random.uniform(40.0, 600.0))
-            amount = round(random.uniform(18000.0, 65000.0), 2)
-            cat = random.choice(["electronics", "wire_remittance"])
-            merchant_id = random.choice(self.merchants[cat])
-            city = user.last_city
-            lat, lon, country = user.last_lat, user.last_lon, user.last_country
-            device_id = f"dev_{uuid.uuid4().hex[:12]}"
-            device_type = "Android_Emulator"
-            ip = f"45.{random.randint(10, 250)}.{random.randint(1, 250)}.{random.randint(1, 250)}"
-            is_intl = False
-            card_present = False
-
         else:  # international_spike
-            # Pattern 6: Rapid foreign charge
             txn_time = user.last_timestamp + timedelta(seconds=random.uniform(30.0, 240.0))
             foreign_city = random.choice(["Dubai", "Singapore", "London"])
             lat_f, lon_f, country_f = CITIES[foreign_city]
             lat, lon, city, country = lat_f, lon_f, foreign_city, country_f
-            amount = round(random.uniform(35000.0, 120000.0), 2)
+            amount = round(random.uniform(25000.0, 95000.0), 2)
             cat = random.choice(["wire_remittance", "luxury_watches"])
             merchant_id = random.choice(self.merchants[cat])
             device_id = f"dev_{uuid.uuid4().hex[:12]}"

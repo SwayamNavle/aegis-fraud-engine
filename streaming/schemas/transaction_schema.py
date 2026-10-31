@@ -16,6 +16,7 @@ class TransactionEvent(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     transaction_id: str = Field(..., description="Unique transaction identifier (e.g. txn_...)")
+    correlation_id: Optional[str] = Field(None, description="End-to-end tracing correlation ID")
     timestamp: str = Field(..., description="ISO 8601 transaction timestamp")
     user_id: str = Field(..., description="Unique customer user ID")
     account_id: str = Field(..., description="Account ID used for Kafka partition affinity")
@@ -51,6 +52,7 @@ class ProductionTransactionEvent(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     transaction_id: str
+    correlation_id: Optional[str] = None
     timestamp: str
     user_id: str
     account_id: str
@@ -165,15 +167,20 @@ FEATURE_NAMES: List[str] = [
 
 
 class PredictionResult(BaseModel):
-    """Inference result returned by XGBoost scoring engine."""
+    """Inference result returned by XGBoost scoring engine and Risk Decision Engine."""
     transaction_id: str
+    correlation_id: Optional[str] = None
     fraud_probability: float
     risk_score: float = Field(..., description="Calibrated risk score between 0.0 and 100.0")
+    risk_level: Optional[str] = Field(default="LOW", description="LOW, MEDIUM, HIGH, CRITICAL")
+    business_decision: Optional[str] = Field(default="APPROVE", description="APPROVE, REVIEW, DECLINE")
     decision: str = Field(..., description="LEGITIMATE, SUSPICIOUS, or FRAUD")
     model_version: str
     latency_ms: float
     reason_codes: List[str] = Field(default_factory=list)
+    rule_violations: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     feature_contributions: Optional[Dict[str, float]] = None
+    decision_rationale: Optional[str] = None
 
 
 class FraudAlert(BaseModel):

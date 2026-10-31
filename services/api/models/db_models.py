@@ -66,6 +66,7 @@ class PredictionRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     transaction_id = Column(String(64), unique=True, nullable=False, index=True)
+    correlation_id = Column(String(64), nullable=True, index=True)
     timestamp = Column(String(64), nullable=False, index=True)
     account_id = Column(String(64), nullable=False, index=True)
     amount = Column(Float, nullable=False)
@@ -74,15 +75,18 @@ class PredictionRecord(Base):
     fraud_probability = Column(Float, nullable=False)
     risk_score = Column(Float, nullable=False)
     decision = Column(String(32), nullable=False, index=True)
+    business_decision = Column(String(32), default="APPROVE", index=True)
     model_version = Column(String(64), nullable=False)
     latency_ms = Column(Float, nullable=False)
     reason_codes = Column(JSON, default=list)
     feature_contributions = Column(JSON, default=dict)
+    ground_truth = Column(String(32), default="UNVERIFIED")  # UNVERIFIED, CONFIRMED_FRAUD, FALSE_POSITIVE
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "transaction_id": self.transaction_id,
+            "correlation_id": self.correlation_id,
             "timestamp": self.timestamp,
             "account_id": self.account_id,
             "amount": self.amount,
@@ -91,10 +95,12 @@ class PredictionRecord(Base):
             "fraud_probability": self.fraud_probability,
             "risk_score": self.risk_score,
             "decision": self.decision,
+            "business_decision": self.business_decision or self.decision,
             "model_version": self.model_version,
             "latency_ms": self.latency_ms,
             "reason_codes": self.reason_codes or [],
-            "feature_contributions": self.feature_contributions or {}
+            "feature_contributions": self.feature_contributions or {},
+            "ground_truth": self.ground_truth or "UNVERIFIED"
         }
 
 
@@ -165,7 +171,10 @@ class FraudAlertRecord(Base):
     risk_score = Column(Float, nullable=False)
     fraud_probability = Column(Float, nullable=False)
     reason_codes = Column(JSON, default=list)
-    status = Column(String(32), default="OPEN", index=True)  # OPEN, REVIEWED, DISMISSED, ESCALATED
+    status = Column(String(32), default="NEW", index=True)  # NEW, UNDER_REVIEW, CONFIRMED_FRAUD, FALSE_POSITIVE, DISMISSED, ESCALATED
+    reviewer = Column(String(64), nullable=True)
+    notes = Column(String(512), nullable=True)
+    final_ground_truth = Column(String(32), default="UNVERIFIED")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -180,6 +189,9 @@ class FraudAlertRecord(Base):
             "fraud_probability": self.fraud_probability,
             "reason_codes": self.reason_codes or [],
             "status": self.status,
+            "reviewer": self.reviewer,
+            "notes": self.notes,
+            "final_ground_truth": self.final_ground_truth or "UNVERIFIED",
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None
         }
@@ -193,11 +205,15 @@ class ModelVersionRecord(Base):
     algorithm = Column(String(64), nullable=False)
     training_timestamp = Column(String(64), nullable=False)
     dataset_rows = Column(Integer, nullable=False)
+    dataset_version = Column(String(32), default="v1.0")
+    feature_version = Column(String(32), default="v1.0")
     fraud_threshold = Column(Float, nullable=False)
     metrics = Column(JSON, nullable=False)
     model_path = Column(String(256), nullable=False)
+    status = Column(String(32), default="PRODUCTION")  # CANDIDATE, STAGING, PRODUCTION, ARCHIVED
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -205,8 +221,75 @@ class ModelVersionRecord(Base):
             "algorithm": self.algorithm,
             "training_timestamp": self.training_timestamp,
             "dataset_rows": self.dataset_rows,
+            "dataset_version": self.dataset_version,
+            "feature_version": self.feature_version,
             "fraud_threshold": self.fraud_threshold,
             "metrics": self.metrics,
             "model_path": self.model_path,
-            "is_active": self.is_active
+            "status": self.status,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+
+class CustomerProfileRecord(Base):
+    __tablename__ = "customer_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String(64), unique=True, nullable=False, index=True)
+    user_id = Column(String(64), nullable=False)
+    total_transactions = Column(Integer, default=0)
+    total_spend = Column(Float, default=0.0)
+    avg_amount = Column(Float, default=0.0)
+    std_amount = Column(Float, default=0.0)
+    max_amount = Column(Float, default=0.0)
+    fraud_count = Column(Integer, default=0)
+    customer_risk_score = Column(Float, default=15.0)
+    known_devices = Column(JSON, default=list)
+    known_countries = Column(JSON, default=list)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "user_id": self.user_id,
+            "total_transactions": self.total_transactions,
+            "total_spend": round(self.total_spend, 2),
+            "avg_amount": round(self.avg_amount, 2),
+            "std_amount": round(self.std_amount, 2),
+            "max_amount": round(self.max_amount, 2),
+            "fraud_count": self.fraud_count,
+            "customer_risk_score": round(self.customer_risk_score, 1),
+            "known_devices": self.known_devices or [],
+            "known_countries": self.known_countries or []
+        }
+
+
+class MerchantProfileRecord(Base):
+    __tablename__ = "merchant_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    merchant_id = Column(String(64), unique=True, nullable=False, index=True)
+    merchant_name = Column(String(128), nullable=False)
+    category = Column(String(64), nullable=False)
+    total_transactions = Column(Integer, default=0)
+    total_volume = Column(Float, default=0.0)
+    fraud_count = Column(Integer, default=0)
+    fraud_rate = Column(Float, default=0.0)
+    merchant_risk_score = Column(Float, default=20.0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "merchant_id": self.merchant_id,
+            "merchant_name": self.merchant_name,
+            "category": self.category,
+            "total_transactions": self.total_transactions,
+            "total_volume": round(self.total_volume, 2),
+            "avg_amount": round(self.total_volume / max(1, self.total_transactions), 2),
+            "fraud_count": self.fraud_count,
+            "fraud_rate": round(self.fraud_rate, 2),
+            "merchant_risk_score": round(self.merchant_risk_score, 1)
         }

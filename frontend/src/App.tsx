@@ -5,9 +5,15 @@ import { AlertsPanel } from "./components/AlertsPanel";
 import { ChartsView } from "./components/ChartsView";
 import { SystemHealth } from "./components/SystemHealth";
 import { TransactionModal } from "./components/TransactionModal";
+import { CustomersView } from "./components/CustomersView";
+import { MerchantsView } from "./components/MerchantsView";
+import { ModelsView } from "./components/ModelsView";
 import { TransactionItem, AlertItem, KPIStats, SystemStatusItem } from "./types";
 
+type ViewTab = "overview" | "transactions" | "alerts" | "customers" | "merchants" | "models" | "health";
+
 export const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<ViewTab>("overview");
   const [transactions, setTransactions] = useState<TransactionItem[]>([]);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [stats, setStats] = useState<KPIStats>({
@@ -23,15 +29,14 @@ export const App: React.FC = () => {
   >([]);
   const [fraudData, setFraudData] = useState({
     decisions: [
-      { name: "Legitimate", value: 980, color: "#10B981" },
-      { name: "Suspicious", value: 14, color: "#F59E0B" },
-      { name: "Fraud", value: 16, color: "#EF4444" },
+      { name: "Approve", value: 980, color: "#10B981" },
+      { name: "Review", value: 14, color: "#F59E0B" },
+      { name: "Decline", value: 16, color: "#EF4444" },
     ],
     risk_distribution: [
-      { range: "0-20 (Low)", count: 720 },
-      { range: "20-40 (Normal)", count: 180 },
-      { range: "40-60 (Elevated)", count: 45 },
-      { range: "60-80 (Suspicious)", count: 25 },
+      { range: "0-30 (Low)", count: 720 },
+      { range: "30-60 (Medium)", count: 180 },
+      { range: "60-80 (High)", count: 45 },
       { range: "80-100 (Critical)", count: 18 },
     ],
     top_countries: [
@@ -42,10 +47,12 @@ export const App: React.FC = () => {
   });
   const [selectedTxn, setSelectedTxn] = useState<TransactionItem | null>(null);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [alertWsConnected, setAlertWsConnected] = useState<boolean>(false);
 
   const systemServices: SystemStatusItem[] = [
     { name: "Kafka Broker", status: "ONLINE", mode: "KRaft Cluster", description: "Partitioned by account_id" },
     { name: "PySpark Streaming", status: "ONLINE", mode: "5m Slide (1m Window)", description: "Watermarked 10m" },
+    { name: "Risk Decision Engine", status: "ONLINE", mode: "Multi-Factor v2.0", description: "ML + Rules + Profiles" },
     { name: "XGBoost Engine", status: "ONLINE", mode: "xgb-v1.0.0", description: "Sub-2ms Inference SLA" },
     { name: "PostgreSQL", status: "ONLINE", mode: "ACID Idempotent", description: "Unique txn_id constraints" },
     { name: "Prometheus", status: "ONLINE", mode: "5s Polling", description: "Histogram latency metrics" },
@@ -67,40 +74,48 @@ export const App: React.FC = () => {
           setThroughputHistory(tp);
         }
 
-        const alertsRes = await fetch("/alerts?limit=20");
+        const fRes = await fetch("/stats/fraud");
+        if (fRes.ok) {
+          const fd = await fRes.json();
+          setFraudData(fd);
+        }
+
+        const alertsRes = await fetch("/alerts?limit=30");
         if (alertsRes.ok) {
           const a = await alertsRes.json();
           setAlerts(a.items || []);
         }
 
-        const txRes = await fetch("/transactions?limit=30");
+        const txRes = await fetch("/transactions?limit=40");
         if (txRes.ok) {
           const t = await txRes.json();
           setTransactions(t.items || []);
         }
       } catch (err) {
-        console.warn("Rest fetch error (using streaming defaults):", err);
+        console.warn("REST fetch fallback:", err);
       }
     };
     fetchInitialData();
   }, []);
 
-  // Connect WebSocket for live streaming
+  // Connect WebSockets for live streaming & dedicated alerts
   useEffect(() => {
-    let ws: WebSocket;
+    let wsTx: WebSocket;
+    let wsAlt: WebSocket;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host || "localhost:8000";
-    const wsUrl = `${protocol}//${host}/ws/transactions`;
 
-    const connectWs = () => {
-      ws = new WebSocket(wsUrl);
+    const connectStreams = () => {
+      wsTx = new WebSocket(`${protocol}//${host}/ws/transactions`);
+      wsAlt = new WebSocket(`${protocol}//${host}/ws/alerts`);
 
-      ws.onopen = () => {
-        setWsConnected(true);
-        console.log("[Aegis UI] Connected to live transaction stream.");
+      wsTx.onopen = () => setWsConnected(true);
+      wsTx.onclose = () => {
+        setWsConnected(false);
+        setTimeout(connectStreams, 2500);
       };
 
-      ws.onmessage = (event) => {
+      wsTx.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === "TRANSACTION_EVENT") {
@@ -108,7 +123,7 @@ export const App: React.FC = () => {
             setTransactions((prev) => [txn, ...prev.slice(0, 49)]);
 
             if (data.alert) {
-              setAlerts((prev) => [data.alert, ...prev.slice(0, 29)]);
+              setAlerts((prev) => [data.alert, ...prev.slice(0, 39)]);
             }
 
             if (data.stats) {
@@ -122,34 +137,54 @@ export const App: React.FC = () => {
             }
           }
         } catch (e) {
-          console.error("Failed to parse WS message:", e);
+          console.error("WS Parse error:", e);
         }
       };
 
-      ws.onclose = () => {
-        setWsConnected(false);
-        setTimeout(connectWs, 2000);
+      wsAlt.onopen = () => setAlertWsConnected(true);
+      wsAlt.onclose = () => setAlertWsConnected(false);
+      wsAlt.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "FRAUD_ALERT" && data.alert) {
+            setAlerts((prev) => [data.alert, ...prev.slice(0, 39)]);
+          }
+        } catch (e) {
+          console.error("Alert WS error:", e);
+        }
       };
     };
 
-    connectWs();
+    connectStreams();
     return () => {
-      if (ws) ws.close();
+      if (wsTx) wsTx.close();
+      if (wsAlt) wsAlt.close();
     };
   }, []);
 
   const handleUpdateAlertStatus = async (
     alertId: string,
-    newStatus: "REVIEWED" | "DISMISSED" | "ESCALATED"
+    newStatus: string,
+    reviewer: string = "analyst_soc",
+    notes: string = "Status updated via SOC triage action"
   ) => {
     try {
-      await fetch(`/alerts/${alertId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
-      });
+      if (newStatus === "CONFIRMED_FRAUD" || newStatus === "FALSE_POSITIVE") {
+        await fetch(`/alerts/${alertId}/investigate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reviewer, outcome: newStatus, notes }),
+        });
+      } else {
+        await fetch(`/alerts/${alertId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: newStatus, reviewer, notes }),
+        });
+      }
+
       setAlerts((prev) =>
-        prev.map((a) => (a.alert_id === alertId ? { ...a, status: newStatus } : a))
+        prev.map((a) => (a.alert_id === alertId ? { ...a, status: newStatus as any, reviewer } : a))
       );
     } catch (e) {
       console.error("Failed to update alert:", e);
@@ -159,9 +194,9 @@ export const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#070b14] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
       {/* Top Cyber Navigation Bar */}
-      <header className="border-b border-slate-800/80 bg-[#0a0f1d]/90 backdrop-blur sticky top-0 z-40 px-6 py-3.5 flex items-center justify-between shadow-2xl">
+      <header className="border-b border-slate-800/80 bg-[#0a0f1d]/90 backdrop-blur sticky top-0 z-40 px-6 py-3.5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xl">
         <div className="flex items-center gap-4">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-600 to-indigo-600 flex items-center justify-center font-black text-white text-base shadow-lg shadow-cyan-500/20 tracking-tighter">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-600 via-indigo-600 to-emerald-600 flex items-center justify-center font-black text-white text-base shadow-lg shadow-cyan-500/20 tracking-tighter">
             AE
           </div>
           <div>
@@ -169,8 +204,8 @@ export const App: React.FC = () => {
               <h1 className="text-base font-black tracking-widest uppercase text-slate-100 font-mono">
                 AEGIS COMMAND CENTER
               </h1>
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold tracking-widest bg-cyan-950 border border-cyan-800 text-cyan-400">
-                PROD-ENGINE
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold tracking-widest bg-cyan-950 border border-cyan-800 text-cyan-400 font-mono">
+                FINTECH-PROD
               </span>
             </div>
             <p className="text-[11px] text-slate-400 font-mono">
@@ -179,8 +214,33 @@ export const App: React.FC = () => {
           </div>
         </div>
 
+        {/* Navigation Tabs */}
+        <nav className="flex items-center gap-1 overflow-x-auto text-xs font-mono bg-slate-900/80 p-1 rounded-xl border border-slate-800">
+          {[
+            { id: "overview", label: "Overview" },
+            { id: "transactions", label: "Live Feed" },
+            { id: "alerts", label: "Alerts & Triage" },
+            { id: "customers", label: "Customers" },
+            { id: "merchants", label: "Merchants" },
+            { id: "models", label: "Models" },
+            { id: "health", label: "System Health" },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as ViewTab)}
+              className={`px-3 py-1.5 rounded-lg transition whitespace-nowrap ${
+                activeTab === tab.id
+                  ? "bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40 shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+
         {/* Status Indicators */}
-        <div className="flex items-center gap-4 text-xs font-mono">
+        <div className="hidden lg:flex items-center gap-4 text-xs font-mono">
           <div className="flex items-center gap-2 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-lg">
             <span
               className={`w-2 h-2 rounded-full ${
@@ -188,42 +248,65 @@ export const App: React.FC = () => {
               }`}
             />
             <span className={wsConnected ? "text-emerald-400 font-semibold" : "text-rose-400"}>
-              {wsConnected ? "STREAM LIVE" : "RECONNECTING"}
+              {wsConnected ? "STREAM LIVE" : "OFFLINE"}
             </span>
           </div>
 
-          <div className="hidden md:flex items-center gap-2 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-lg text-slate-300">
-            <span className="text-slate-500">MODEL:</span>
-            <span className="text-cyan-400 font-bold">xgb-v1.0.0</span>
-            <span className="text-slate-500 ml-1">THR:</span>
-            <span className="text-amber-400 font-bold">0.70</span>
+          <div className="flex items-center gap-2 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-lg text-slate-300">
+            <span className="text-slate-500">DECISION:</span>
+            <span className="text-cyan-400 font-bold">RiskEngine v2.0</span>
           </div>
         </div>
       </header>
 
       {/* Main Dashboard Workspace */}
-      <main className="flex-1 p-6 max-w-[1680px] mx-auto w-full">
-        {/* KPI Cards */}
+      <main className="flex-1 p-6 max-w-[1720px] mx-auto w-full space-y-6">
+        {/* KPI Deck is always visible on top for high-level pulse */}
         <KPICards stats={stats} />
 
-        {/* Cluster Mesh Health */}
-        <SystemHealth services={systemServices} />
+        {/* Tab-driven View Switching */}
+        {activeTab === "overview" && (
+          <div className="space-y-6">
+            <ChartsView throughputData={throughputHistory} fraudData={fraudData} />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <LiveFeed transactions={transactions} onSelectTransaction={setSelectedTxn} />
+              </div>
+              <div className="lg:col-span-1">
+                <AlertsPanel alerts={alerts} onUpdateStatus={handleUpdateAlertStatus} />
+              </div>
+            </div>
+            <SystemHealth services={systemServices} />
+          </div>
+        )}
 
-        {/* Charts & Drift */}
-        <ChartsView throughputData={throughputHistory} fraudData={fraudData} />
-
-        {/* Live Transaction Feed & SOC Alert Triage */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
+        {activeTab === "transactions" && (
+          <div className="space-y-6">
             <LiveFeed transactions={transactions} onSelectTransaction={setSelectedTxn} />
           </div>
-          <div className="lg:col-span-1">
+        )}
+
+        {activeTab === "alerts" && (
+          <div className="space-y-6">
             <AlertsPanel alerts={alerts} onUpdateStatus={handleUpdateAlertStatus} />
           </div>
-        </div>
+        )}
+
+        {activeTab === "customers" && <CustomersView />}
+
+        {activeTab === "merchants" && <MerchantsView />}
+
+        {activeTab === "models" && <ModelsView />}
+
+        {activeTab === "health" && (
+          <div className="space-y-6">
+            <SystemHealth services={systemServices} />
+            <ChartsView throughputData={throughputHistory} fraudData={fraudData} />
+          </div>
+        )}
       </main>
 
-      {/* Transaction Modal Detail */}
+      {/* Transaction Inspection Dossier Modal */}
       <TransactionModal transaction={selectedTxn} onClose={() => setSelectedTxn(null)} />
     </div>
   );

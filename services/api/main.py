@@ -1,12 +1,13 @@
 """
 Aegis Core FastAPI Application
-Unified backend gateway for real-time fraud detection, analytics, and WebSockets.
+Unified backend gateway for real-time fraud detection, analytics, model governance, and WebSockets.
 """
 
 import os
 import sys
 import time
 from typing import Dict, Any
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,12 +17,29 @@ from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_
 # Ensure project root is in python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from services.api.database.connection import init_db
-from services.api.routes import transactions, alerts, stats, monitoring, websocket
+from services.api.routes import (
+    transactions, alerts, stats, monitoring, websocket,
+    models, customers, merchants
+)
+from services.api.data_quality import DeadLetterQueue
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("[Aegis API] Initializing database schema...")
+    await init_db()
+    print("[Aegis API] System ready to receive streaming traffic.")
+    yield
+    print("[Aegis API] Graceful shutdown complete.")
+
 
 app = FastAPI(
     title="Aegis Fraud Detection Engine API",
     description="Distributed Event-Streaming & Real-Time Fraud Detection Engine",
-    version="1.0.0"
+    version="2.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    lifespan=lifespan
 )
 
 # CORS Configuration
@@ -69,19 +87,15 @@ async def prometheus_telemetry_middleware(request: Request, call_next):
     return response
 
 
-@app.on_event("startup")
-async def on_startup():
-    print("[Aegis API] Initializing database schema...")
-    await init_db()
-    print("[Aegis API] System ready to receive streaming traffic.")
-
-
 # Mount API Routers
 app.include_router(transactions.router)
 app.include_router(alerts.router)
 app.include_router(stats.router)
 app.include_router(monitoring.router)
 app.include_router(websocket.router)
+app.include_router(models.router)
+app.include_router(customers.router)
+app.include_router(merchants.router)
 
 
 @app.get("/health")
@@ -89,6 +103,7 @@ def health():
     return {
         "status": "ONLINE",
         "service": "aegis-api-gateway",
+        "version": "2.0.0",
         "timestamp": time.time()
     }
 
@@ -111,6 +126,16 @@ def predict_transaction(payload: Dict[str, Any]):
         fv = FeatureVector(**payload)
         return predictor.predict(feature_vector=fv)
     return predictor.predict(raw_txn=payload)
+
+
+@app.get("/dlq")
+def get_dead_letter_queue():
+    """Returns dead-letter queue records for review."""
+    return {
+        "dlq_topic": "transactions.dlq",
+        "items": DeadLetterQueue.get_dlq_messages(),
+        "total_messages": len(DeadLetterQueue._dlq_buffer)
+    }
 
 
 @app.get("/metrics")

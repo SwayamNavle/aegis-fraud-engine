@@ -15,12 +15,16 @@ Outputs serialized model, metrics, and metadata artifacts.
 import json
 import os
 import sys
+import time
 import yaml
 import numpy as np
 import pandas as pd
 from typing import Tuple, Dict, Any, List, Optional
 from datetime import datetime, timezone
 from xgboost import XGBClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 
 # Ensure project root is in python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -125,11 +129,68 @@ def train_pipeline(config_path: str = "ml/training/model_config.yaml") -> Dict[s
 
     models = {}
     val_metrics = {}
+    benchmarks = {}
 
     # -----------------------------------------------------------------
-    # MODEL 1: BASELINE (Unweighted XGBoost)
+    # BASELINE 1: LOGISTIC REGRESSION (Linear Baseline)
     # -----------------------------------------------------------------
-    print("\n--- Training Model 1: Baseline (Unweighted) ---")
+    print("\n--- Training Baseline 1: Logistic Regression ---")
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+
+    lr_model = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
+    t0 = time.perf_counter()
+    lr_model.fit(X_train_scaled, y_train)
+    lr_fit_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    lr_val_probs = lr_model.predict_proba(X_val_scaled)[:, 1]
+    lr_inf_latency_ms = ((time.perf_counter() - t0) / len(X_val)) * 1000.0
+
+    lr_val_eval = evaluate_model(y_val.values, lr_val_probs, threshold=0.5)
+    print(f"  Logistic Regression Val PR-AUC: {lr_val_eval['pr_auc']:.4f} | F1: {lr_val_eval['f1_score']:.4f} | Latency: {lr_inf_latency_ms:.4f}ms/txn")
+    benchmarks["logistic_regression"] = {
+        "pr_auc": lr_val_eval["pr_auc"],
+        "roc_auc": lr_val_eval["roc_auc"],
+        "f1_score": lr_val_eval["f1_score"],
+        "precision": lr_val_eval["precision"],
+        "recall": lr_val_eval["recall"],
+        "fit_time_sec": round(lr_fit_time, 3),
+        "inf_latency_ms": round(lr_inf_latency_ms, 4)
+    }
+
+    # -----------------------------------------------------------------
+    # BASELINE 2: RANDOM FOREST (Bagging Ensemble)
+    # -----------------------------------------------------------------
+    print("\n--- Training Baseline 2: Random Forest ---")
+    rf_model = RandomForestClassifier(n_estimators=100, max_depth=10, class_weight="balanced", random_state=42, n_jobs=-1)
+    t0 = time.perf_counter()
+    rf_model.fit(X_train, y_train)
+    rf_fit_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    rf_val_probs = rf_model.predict_proba(X_val)[:, 1]
+    rf_inf_latency_ms = ((time.perf_counter() - t0) / len(X_val)) * 1000.0
+
+    rf_val_eval = evaluate_model(y_val.values, rf_val_probs, threshold=0.5)
+    print(f"  Random Forest Val PR-AUC: {rf_val_eval['pr_auc']:.4f} | F1: {rf_val_eval['f1_score']:.4f} | Latency: {rf_inf_latency_ms:.4f}ms/txn")
+    benchmarks["random_forest"] = {
+        "pr_auc": rf_val_eval["pr_auc"],
+        "roc_auc": rf_val_eval["roc_auc"],
+        "f1_score": rf_val_eval["f1_score"],
+        "precision": rf_val_eval["precision"],
+        "recall": rf_val_eval["recall"],
+        "fit_time_sec": round(rf_fit_time, 3),
+        "inf_latency_ms": round(rf_inf_latency_ms, 4)
+    }
+
+    # -----------------------------------------------------------------
+    # MODEL 1: BASELINE XGBoost (Unweighted Gradient Boosting)
+    # -----------------------------------------------------------------
+    print("\n--- Training Model 3: XGBoost Baseline (Unweighted) ---")
+    t0 = time.perf_counter()
     base_model = XGBClassifier(
         n_estimators=cfg["model"]["n_estimators"],
         max_depth=cfg["model"]["max_depth"],
@@ -140,15 +201,29 @@ def train_pipeline(config_path: str = "ml/training/model_config.yaml") -> Dict[s
         eval_metric=cfg["model"]["eval_metric"]
     )
     base_model.fit(X_train, y_train)
+    xgb_fit_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     base_val_probs = base_model.predict_proba(X_val)[:, 1]
+    xgb_inf_latency_ms = ((time.perf_counter() - t0) / len(X_val)) * 1000.0
+
     models["baseline"] = base_model
     val_metrics["baseline"] = evaluate_model(y_val.values, base_val_probs, threshold=0.5)
-    print(f"  Baseline Val PR-AUC: {val_metrics['baseline']['pr_auc']:.4f} | F1: {val_metrics['baseline']['f1_score']:.4f}")
+    print(f"  XGBoost Baseline Val PR-AUC: {val_metrics['baseline']['pr_auc']:.4f} | F1: {val_metrics['baseline']['f1_score']:.4f} | Latency: {xgb_inf_latency_ms:.4f}ms/txn")
+    benchmarks["xgboost_baseline"] = {
+        "pr_auc": val_metrics["baseline"]["pr_auc"],
+        "roc_auc": val_metrics["baseline"]["roc_auc"],
+        "f1_score": val_metrics["baseline"]["f1_score"],
+        "precision": val_metrics["baseline"]["precision"],
+        "recall": val_metrics["baseline"]["recall"],
+        "fit_time_sec": round(xgb_fit_time, 3),
+        "inf_latency_ms": round(xgb_inf_latency_ms, 4)
+    }
 
     # -----------------------------------------------------------------
     # MODEL 2: CLASS-WEIGHTED XGBoost (scale_pos_weight)
     # -----------------------------------------------------------------
-    print("\n--- Training Model 2: Class-Weighted (scale_pos_weight) ---")
+    print("\n--- Training Model 4: Class-Weighted XGBoost (scale_pos_weight) ---")
     weighted_model = XGBClassifier(
         n_estimators=cfg["model"]["n_estimators"],
         max_depth=cfg["model"]["max_depth"],
@@ -168,7 +243,7 @@ def train_pipeline(config_path: str = "ml/training/model_config.yaml") -> Dict[s
     # -----------------------------------------------------------------
     # MODEL 3: BALANCED RESAMPLED XGBoost (Synthetic Augmentation)
     # -----------------------------------------------------------------
-    print("\n--- Training Model 3: Balanced Resampled (SMOTE-style) ---")
+    print("\n--- Training Model 5: Balanced Resampled XGBoost (SMOTE-style) ---")
     X_train_res, y_train_res = resample_balanced(X_train, y_train, target_ratio=0.25)
     smote_model = XGBClassifier(
         n_estimators=cfg["model"]["n_estimators"],
@@ -281,6 +356,12 @@ def train_pipeline(config_path: str = "ml/training/model_config.yaml") -> Dict[s
     }
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
+
+    # 7. Save Baseline Multi-Model Comparison (Logistic Regression vs Random Forest vs XGBoost)
+    baseline_path = os.path.join(cfg["artifacts"]["artifacts_dir"], "baseline_comparison.json")
+    with open(baseline_path, "w") as f:
+        json.dump(benchmarks, f, indent=2)
+    print(f"[Aegis Artifacts] Baseline comparison saved to: {baseline_path}")
 
     print(f"[Aegis Artifacts] All training artifacts successfully written to '{cfg['artifacts']['artifacts_dir']}'")
     return final_metrics

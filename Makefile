@@ -1,4 +1,4 @@
-.PHONY: all install train test lint format run docker-up docker-down benchmark k8s-deploy clean help
+.PHONY: all install train test lint format run docker-up docker-down benchmark k8s-deploy pdf clean help
 
 PYTHON ?= .venv/bin/python3
 PIP ?= .venv/bin/pip
@@ -42,6 +42,9 @@ run:
 
 benchmark:
 	bash scripts/benchmark.sh
+
+pdf:
+	$(PYTHON) scripts/generate_complete_guide_pdf.py
 
 lint:
 	@echo "[+] Checking code syntax..."

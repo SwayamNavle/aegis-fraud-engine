@@ -1,6 +1,8 @@
 """
 Aegis Real-Time WebSocket Streaming Gateway
-Manages WebSocket connections and broadcasts live scored transactions, alerts, and KPIs to React clients.
+Broadcasts live transaction streams and high-priority fraud alerts to React dashboards:
+- /ws/transactions: Unified live transaction feed, KPIs, and alerts
+- /ws/alerts: Dedicated real-time high-priority SOC alert stream
 """
 
 import asyncio
@@ -13,69 +15,100 @@ from streaming.producer.producer import SyntheticTransactionGenerator
 from services.scoring.predictor import FraudPredictor
 from services.api.database.connection import get_engine, AsyncSession, async_sessionmaker
 from services.api.models.db_models import TransactionRecord, PredictionRecord, FraudAlertRecord
+from risk_engine.profiler import ProfileManager
 
 router = APIRouter(tags=["WebSocket"])
 
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
+        self.transaction_connections: Set[WebSocket] = set()
+        self.alert_connections: Set[WebSocket] = set()
         self.generator = SyntheticTransactionGenerator(num_users=1500, fraud_ratio=0.035)
         self.predictor = None
         self._background_task: asyncio.Task = None
         self.total_processed = 0
         self.total_fraud = 0
 
-    async def connect(self, websocket: WebSocket):
+    async def connect_transactions(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.add(websocket)
-        print(f"[Aegis WebSocket] Client connected. Total active clients: {len(self.active_connections)}")
+        self.transaction_connections.add(websocket)
+        print(f"[Aegis WS] Transactions client connected. Active: {len(self.transaction_connections)}")
+        self._ensure_background_stream()
 
+    def disconnect_transactions(self, websocket: WebSocket):
+        self.transaction_connections.discard(websocket)
+        print(f"[Aegis WS] Transactions client disconnected. Active: {len(self.transaction_connections)}")
+
+    async def connect_alerts(self, websocket: WebSocket):
+        await websocket.accept()
+        self.alert_connections.add(websocket)
+        print(f"[Aegis WS] Alerts client connected. Active: {len(self.alert_connections)}")
+        self._ensure_background_stream()
+
+    def disconnect_alerts(self, websocket: WebSocket):
+        self.alert_connections.discard(websocket)
+        print(f"[Aegis WS] Alerts client disconnected. Active: {len(self.alert_connections)}")
+
+    def _ensure_background_stream(self):
         if self.predictor is None:
             self.predictor = FraudPredictor()
-
-        # Start live background streamer if not already running
         if self._background_task is None or self._background_task.done():
             self._background_task = asyncio.create_task(self._live_streaming_loop())
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
-        print(f"[Aegis WebSocket] Client disconnected. Total active clients: {len(self.active_connections)}")
-
-    async def broadcast(self, message: dict):
+    async def broadcast_transactions(self, message: dict):
         dead_clients = []
-        for connection in self.active_connections:
+        for connection in self.transaction_connections:
             try:
                 await connection.send_json(message)
             except Exception:
                 dead_clients.append(connection)
-
         for dead in dead_clients:
-            self.active_connections.discard(dead)
+            self.transaction_connections.discard(dead)
+
+    async def broadcast_alerts(self, message: dict):
+        dead_clients = []
+        for connection in self.alert_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                dead_clients.append(connection)
+        for dead in dead_clients:
+            self.alert_connections.discard(dead)
 
     async def _live_streaming_loop(self):
         """Generates continuous live stream events and broadcasts to connected dashboards."""
-        print("[Aegis WebSocket] Live transaction stream broadcaster started.")
+        print("[Aegis WS] Live transaction stream broadcaster active.")
         engine = await get_engine()
         session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+        profile_mgr = ProfileManager.get_instance()
 
         try:
-            while len(self.active_connections) > 0:
-                # Generate transaction
+            while (len(self.transaction_connections) > 0 or len(self.alert_connections) > 0):
+                # 1. Generate transaction
                 event = self.generator.generate_event()
                 raw_dict = event.to_production_dict()
 
-                # Score with XGBoost model
+                # 2. Extract features and predict with Risk Decision Engine
                 fv = self.predictor.feature_store.extract_features(raw_dict)
-                pred = self.predictor.predict(feature_vector=fv)
+                pred = self.predictor.predict(raw_txn=raw_dict, feature_vector=fv)
 
                 self.total_processed += 1
-                if pred.decision == "FRAUD":
+                is_fraud_decision = pred.business_decision in ["DECLINE", "REVIEW"] or pred.decision in ["FRAUD", "SUSPICIOUS"]
+                if is_fraud_decision:
                     self.total_fraud += 1
 
-                # Construct payload
+                # 3. Update customer and merchant behavioral profiles
+                cust = profile_mgr.get_or_create_customer(event.account_id, event.user_id)
+                cust.update_with_transaction(event.amount, event.device_id, event.country, is_fraud=is_fraud_decision)
+
+                merch = profile_mgr.get_or_create_merchant(event.merchant_id, category=event.merchant_category)
+                merch.update_with_transaction(event.amount, is_fraud=is_fraud_decision)
+
+                # 4. Construct live feed payload
                 feed_item = {
                     "transaction_id": event.transaction_id,
+                    "correlation_id": pred.correlation_id,
                     "timestamp": event.timestamp,
                     "account_id": event.account_id,
                     "user_id": event.user_id,
@@ -86,31 +119,38 @@ class ConnectionManager:
                     "country": event.country,
                     "city": event.city,
                     "risk_score": pred.risk_score,
+                    "risk_level": pred.risk_level or "LOW",
+                    "business_decision": pred.business_decision or "APPROVE",
                     "decision": pred.decision,
                     "latency_ms": pred.latency_ms,
                     "reason_codes": pred.reason_codes,
-                    "feature_contributions": pred.feature_contributions
+                    "rule_violations": pred.rule_violations or [],
+                    "feature_contributions": pred.feature_contributions,
+                    "decision_rationale": pred.decision_rationale
                 }
 
                 alert_item = None
-                if pred.decision in ["FRAUD", "SUSPICIOUS"]:
+                if is_fraud_decision or pred.risk_score >= 45.0:
+                    severity = "CRITICAL" if pred.risk_score >= 80.0 else ("HIGH" if pred.risk_score >= 60.0 else "MEDIUM")
                     alert_item = {
                         "alert_id": f"alt_{event.transaction_id[-8:]}",
                         "transaction_id": event.transaction_id,
                         "account_id": event.account_id,
                         "amount": event.amount,
-                        "severity": "CRITICAL" if pred.risk_score >= 85.0 else ("HIGH" if pred.risk_score >= 70.0 else "MEDIUM"),
+                        "severity": severity,
                         "risk_score": pred.risk_score,
                         "reason_codes": pred.reason_codes,
-                        "status": "OPEN",
-                        "timestamp": event.timestamp
+                        "status": "NEW",
+                        "timestamp": event.timestamp,
+                        "decision_rationale": pred.decision_rationale
                     }
 
-                # Persist to database asynchronously
+                # 5. Persist to database asynchronously
                 try:
                     async with session_factory() as session:
                         p_rec = PredictionRecord(
                             transaction_id=event.transaction_id,
+                            correlation_id=pred.correlation_id,
                             timestamp=event.timestamp,
                             account_id=event.account_id,
                             amount=event.amount,
@@ -119,13 +159,14 @@ class ConnectionManager:
                             fraud_probability=pred.fraud_probability,
                             risk_score=pred.risk_score,
                             decision=pred.decision,
+                            business_decision=pred.business_decision or "APPROVE",
                             model_version=pred.model_version,
                             latency_ms=pred.latency_ms,
                             reason_codes=pred.reason_codes,
                             feature_contributions=pred.feature_contributions
                         )
                         session.add(p_rec)
-                        
+
                         if alert_item:
                             alt_rec = FraudAlertRecord(
                                 alert_id=alert_item["alert_id"],
@@ -136,15 +177,14 @@ class ConnectionManager:
                                 risk_score=pred.risk_score,
                                 fraud_probability=pred.fraud_probability,
                                 reason_codes=pred.reason_codes,
-                                status="OPEN"
+                                status="NEW"
                             )
                             session.add(alt_rec)
                         await session.commit()
-                except Exception as e:
-                    # Ignore duplicate keys in live stream
+                except Exception:
                     pass
 
-                # Broadcast update packet to clients
+                # 6. Broadcast to live transaction feed
                 packet = {
                     "type": "TRANSACTION_EVENT",
                     "transaction": feed_item,
@@ -156,15 +196,23 @@ class ConnectionManager:
                         "latest_latency_ms": pred.latency_ms
                     }
                 }
-                await self.broadcast(packet)
+                await self.broadcast_transactions(packet)
 
-                # Stream delay between events (50ms - 250ms for realistic UI ticker animation)
-                await asyncio.sleep(random.uniform(0.08, 0.25))
+                # 7. Broadcast dedicated alert packet if triggered
+                if alert_item:
+                    await self.broadcast_alerts({
+                        "type": "FRAUD_ALERT",
+                        "alert": alert_item,
+                        "transaction": feed_item
+                    })
+
+                # Stream delay between events (80ms - 250ms)
+                await asyncio.sleep(random.uniform(0.08, 0.22))
 
         except asyncio.CancelledError:
             pass
         finally:
-            print("[Aegis WebSocket] Live streaming loop idle.")
+            print("[Aegis WS] Live streaming loop paused.")
 
 
 manager = ConnectionManager()
@@ -172,12 +220,23 @@ manager = ConnectionManager()
 
 @router.websocket("/ws/transactions")
 async def websocket_transactions_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    await manager.connect_transactions(websocket)
     try:
         while True:
-            # Keep-alive receive
-            data = await websocket.receive_text()
+            await websocket.receive_text()
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        manager.disconnect_transactions(websocket)
     except Exception:
-        manager.disconnect(websocket)
+        manager.disconnect_transactions(websocket)
+
+
+@router.websocket("/ws/alerts")
+async def websocket_alerts_endpoint(websocket: WebSocket):
+    await manager.connect_alerts(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_alerts(websocket)
+    except Exception:
+        manager.disconnect_alerts(websocket)

@@ -1,6 +1,7 @@
 """
-Aegis Statistics & Analytics Routes
-Computes real-time streaming KPIs, time-series throughput, latency distributions, and fraud breakdowns.
+Aegis Statistics & Business KPI Analytics Routes
+Computes real-time streaming KPIs, financial fraud exposure, decision breakdowns,
+and time-series throughput for the Aegis Command Center.
 """
 
 from typing import Dict, Any, List
@@ -16,28 +17,60 @@ router = APIRouter(prefix="/stats", tags=["Statistics"])
 
 @router.get("")
 async def get_dashboard_kpis(db: AsyncSession = Depends(get_db_session)) -> Dict[str, Any]:
-    """Returns top-level operational KPIs for the Aegis Command Center."""
+    """
+    Returns top-level operational and business KPIs for the Aegis Command Center.
+    Includes technical metrics and business decision distributions.
+    """
     total_txns = (await db.execute(select(func.count(PredictionRecord.id)))).scalar() or 0
-    fraud_count = (await db.execute(
-        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision == "FRAUD")
-    )).scalar() or 0
-    suspicious_count = (await db.execute(
-        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision == "SUSPICIOUS")
-    )).scalar() or 0
-    avg_latency = (await db.execute(select(func.avg(PredictionRecord.latency_ms)))).scalar() or 1.2
-    open_alerts = (await db.execute(
-        select(func.count(FraudAlertRecord.id)).where(FraudAlertRecord.status == "OPEN")
+    
+    # Decisions count
+    decline_count = (await db.execute(
+        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision.in_(["FRAUD", "DECLINE"]))
     )).scalar() or 0
 
-    fraud_rate = (fraud_count / max(1, total_txns)) * 100.0
+    review_count = (await db.execute(
+        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision.in_(["SUSPICIOUS", "REVIEW"]))
+    )).scalar() or 0
+
+    approve_count = (await db.execute(
+        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision.in_(["LEGITIMATE", "APPROVE"]))
+    )).scalar() or 0
+
+    # Latency & alerts
+    avg_latency = (await db.execute(select(func.avg(PredictionRecord.latency_ms)))).scalar() or 1.2
+    active_alerts = (await db.execute(
+        select(func.count(FraudAlertRecord.id)).where(FraudAlertRecord.status.in_(["OPEN", "NEW", "UNDER_REVIEW"]))
+    )).scalar() or 0
+
+    # Financial Exposure & Spend
+    total_volume = (await db.execute(select(func.sum(PredictionRecord.amount)))).scalar() or 0.0
+    fraud_exposure = (await db.execute(
+        select(func.sum(PredictionRecord.amount)).where(PredictionRecord.decision.in_(["FRAUD", "DECLINE"]))
+    )).scalar() or 0.0
+
+    # Rates
+    denom = max(1, total_txns)
+    fraud_rate = (decline_count / denom) * 100.0
+    approval_rate = (approve_count / denom) * 100.0
+    review_rate = (review_count / denom) * 100.0
+    decline_rate = (decline_count / denom) * 100.0
+    avg_amount = (total_volume / denom) if total_txns > 0 else 2450.0
 
     return {
         "total_transactions": total_txns,
-        "fraud_detected": fraud_count,
-        "suspicious_detected": suspicious_count,
+        "total_processed": total_txns,
+        "fraud_detected": decline_count,
+        "suspicious_detected": review_count,
+        "approved_count": approve_count,
         "fraud_rate_pct": round(fraud_rate, 2),
+        "approval_rate_pct": round(approval_rate, 2),
+        "review_rate_pct": round(review_rate, 2),
+        "decline_rate_pct": round(decline_rate, 2),
         "avg_scoring_latency_ms": round(float(avg_latency), 2),
-        "active_alerts": open_alerts,
+        "active_alerts": active_alerts,
+        "total_volume_inr": round(float(total_volume), 2),
+        "estimated_fraud_exposure_inr": round(float(fraud_exposure), 2),
+        "average_transaction_amount_inr": round(float(avg_amount), 2),
         "current_tps": round(min(5000.0, max(50.0, total_txns * 2.5)), 1)
     }
 
@@ -45,7 +78,6 @@ async def get_dashboard_kpis(db: AsyncSession = Depends(get_db_session)) -> Dict
 @router.get("/throughput")
 async def get_throughput_series(db: AsyncSession = Depends(get_db_session)) -> List[Dict[str, Any]]:
     """Returns recent throughput and latency time-series for charts."""
-    # Query last 20 recent predictions to generate realistic live chart intervals
     res = await db.execute(
         select(PredictionRecord.timestamp, PredictionRecord.latency_ms, PredictionRecord.risk_score)
         .order_by(desc(PredictionRecord.id))
@@ -53,79 +85,72 @@ async def get_throughput_series(db: AsyncSession = Depends(get_db_session)) -> L
     )
     rows = res.all()
     if not rows:
-        # Return sensible default time slots
         return [
             {"time": f"10:{i:02d}", "tps": 250 + (i * 15), "latency_ms": 1.2 + (i % 3) * 0.2}
             for i in range(15)
         ]
 
-    data = []
-    for r in reversed(rows):
-        ts_str = r[0].split("T")[-1][:8] if "T" in r[0] else r[0][-8:]
-        data.append({
-            "time": ts_str,
+    series = []
+    for i, r in enumerate(reversed(rows)):
+        t_label = r[0].split("T")[-1][:5] if "T" in str(r[0]) else f"t-{len(rows)-i}"
+        series.append({
+            "time": t_label,
+            "tps": round(280.0 + (i * 12.5), 1),
             "latency_ms": round(float(r[1]), 2),
-            "risk_score": round(float(r[2]), 1),
-            "tps": round(150.0 + (float(r[2]) * 2.0), 1)
+            "risk_score": round(float(r[2]), 1)
         })
-    return data
+    return series
 
 
 @router.get("/fraud")
 async def get_fraud_analytics(db: AsyncSession = Depends(get_db_session)) -> Dict[str, Any]:
-    """Returns categorized breakdowns of fraud patterns across geography and merchants."""
+    """Returns aggregated breakdown for risk distributions, decision proportions, and geographical counts."""
     # Decision counts
-    legit_cnt = (await db.execute(
-        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision == "LEGITIMATE")
-    )).scalar() or 0
-    susp_cnt = (await db.execute(
-        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision == "SUSPICIOUS")
-    )).scalar() or 0
-    fraud_cnt = (await db.execute(
-        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision == "FRAUD")
+    total_approved = (await db.execute(
+        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision.in_(["LEGITIMATE", "APPROVE"]))
     )).scalar() or 0
 
-    # Country breakdown
-    country_res = await db.execute(
+    total_review = (await db.execute(
+        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision.in_(["SUSPICIOUS", "REVIEW"]))
+    )).scalar() or 0
+
+    total_decline = (await db.execute(
+        select(func.count(PredictionRecord.id)).where(PredictionRecord.decision.in_(["FRAUD", "DECLINE"]))
+    )).scalar() or 0
+
+    # Risk score buckets
+    b_low = (await db.execute(select(func.count(PredictionRecord.id)).where(PredictionRecord.risk_score < 30.0))).scalar() or 0
+    b_med = (await db.execute(select(func.count(PredictionRecord.id)).where(PredictionRecord.risk_score >= 30.0).where(PredictionRecord.risk_score < 60.0))).scalar() or 0
+    b_high = (await db.execute(select(func.count(PredictionRecord.id)).where(PredictionRecord.risk_score >= 60.0).where(PredictionRecord.risk_score < 80.0))).scalar() or 0
+    b_crit = (await db.execute(select(func.count(PredictionRecord.id)).where(PredictionRecord.risk_score >= 80.0))).scalar() or 0
+
+    # Country distribution
+    country_rows = (await db.execute(
         select(PredictionRecord.country, func.count(PredictionRecord.id))
-        .where(PredictionRecord.decision.in_(["FRAUD", "SUSPICIOUS"]))
         .group_by(PredictionRecord.country)
         .order_by(desc(func.count(PredictionRecord.id)))
-        .limit(8)
-    )
-    countries = [{"country": c, "count": cnt} for c, cnt in country_res.all()]
-    if not countries:
-        countries = [{"country": "IN", "count": 12}, {"country": "GB", "count": 7}, {"country": "US", "count": 5}]
+        .limit(6)
+    )).all()
 
-    # Risk distribution histogram buckets [0-20, 20-40, 40-60, 60-80, 80-100]
-    all_preds = (await db.execute(select(PredictionRecord.risk_score).limit(1000))).scalars().all()
-    buckets = [0, 0, 0, 0, 0]
-    for s in all_preds:
-        if s < 20:
-            buckets[0] += 1
-        elif s < 40:
-            buckets[1] += 1
-        elif s < 60:
-            buckets[2] += 1
-        elif s < 80:
-            buckets[3] += 1
-        else:
-            buckets[4] += 1
-
-    risk_dist = [
-        {"range": "0-20 (Low)", "count": buckets[0]},
-        {"range": "20-40 (Normal)", "count": buckets[1]},
-        {"range": "40-60 (Elevated)", "count": buckets[2]},
-        {"range": "60-80 (Suspicious)", "count": buckets[3]},
-        {"range": "80-100 (Critical)", "count": buckets[4]}
+    top_countries = [{"country": r[0], "count": r[1]} for r in country_rows] or [
+        {"country": "IN", "count": 850},
+        {"country": "GB", "count": 65},
+        {"country": "US", "count": 42},
+        {"country": "AE", "count": 28},
+        {"country": "SG", "count": 15}
     ]
 
     return {
         "decisions": [
-            {"name": "Legitimate", "value": legit_cnt, "color": "#10B981"},
-            {"name": "Suspicious", "value": susp_cnt, "color": "#F59E0B"},
-            {"name": "Fraud", "value": fraud_cnt, "color": "#EF4444"}
+            {"name": "Approve", "value": max(1, total_approved), "color": "#10B981"},
+            {"name": "Review", "value": max(0, total_review), "color": "#F59E0B"},
+            {"name": "Decline", "value": max(0, total_decline), "color": "#EF4444"}
         ],
-        "top_countries": countries,
-        "risk_distribution": risk_dist
+        "risk_distribution": [
+            {"range": "0-30 (Low)", "count": b_low},
+            {"range": "30-60 (Medium)", "count": b_med},
+            {"range": "60-80 (High)", "count": b_high},
+            {"range": "80-100 (Critical)", "count": b_crit}
+        ],
+        "top_countries": top_countries
     }
